@@ -17,7 +17,7 @@ import cPickle as pickle
 
 from tensorflow.python.platform import gfile
 
-RESNET_MEAN_FPATH = 'ResNet_mean.pkl'
+RESNET_MEAN_FPATH = 'ResNet_mean_rgb.pkl'
 
 # Constants used in the model
 IMAGE_HEIGHT = 224
