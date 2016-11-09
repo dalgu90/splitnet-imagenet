@@ -1,7 +1,8 @@
 # splitnet-imagenet
 
 Splitted Network based on ResNet-50 (for ImageNet 1K dataset)
-Run only on GPU and basically support multi-GPU training
+
+It runs only on GPU and basically supports multi-GPU training.
 
 <b>Prerequisite</b>
 
