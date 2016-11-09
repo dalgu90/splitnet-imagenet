@@ -84,3 +84,26 @@ def _bn(x, is_train, global_step=None, name='bn'):
 
 
 ## Other helper functions
+
+def _get_loadable_vars(ckpt_path, verbose=False):
+    # Load all variables
+    all_vars = tf.all_variables()
+    # Load var name/var shape maps from checkpoint
+    reader = tf.train.NewCheckpointReader(ckpt_path)
+    vs_map = reader.get_variable_to_shape_map()
+
+    # Get variables with same name and shape
+    ret_vars = []
+    for v in all_vars:
+        colon_pos = v.name.index(':')
+        var_name = v.name[:colon_pos] if colon_pos != -1 else v.name
+        if var_name in vs_map.keys():
+            if v.get_shape().as_list() == vs_map[var_name]:
+                ret_vars.append(v)
+
+    # Print out when verbose=True
+    if verbose:
+        print('List of loadable variables')
+        print('\n'.join(["\t" + v.name + " : " + str(v.get_shape().as_list()) for v in ret_vars]))
+
+    return ret_vars

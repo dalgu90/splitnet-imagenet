@@ -7,7 +7,7 @@ import utils
 
 
 HParams = namedtuple('HParams',
-                     'num_gpu, batch_size, num_classes, weight_decay, '
+                     'num_gpu, batch_size, split, num_classes, weight_decay, '
                      'momentum, no_logit_map')
 
 
@@ -31,17 +31,16 @@ class ResNet(object):
 
     def set_clustering(self, clustering):
         # clustering: 4-depth list(list of list of list of list)
-        # which represented 3-depth tree
-        # print('Parsing clustering')
+        # which is represented as 3-depth tree
+        print('Parsing clustering')
         cluster_size = [[[len(sublist3) for sublist3 in sublist2] for sublist2 in sublist1] for sublist1 in clustering]
         self._split3 = [item for sublist1 in cluster_size for sublist2 in sublist1 for item in sublist2]
         self._split2 = [sum(sublist2) for sublist1 in cluster_size for sublist2 in sublist1]
         self._split1 = [sum([sum(sublist2) for sublist2 in sublist1]) for sublist1 in cluster_size]
         self._logit_map = [item for sublist1 in clustering for sublist2 in sublist1 for sublist3 in sublist2 for item in sublist3]
-        # print('\t1st level: %d splits %s' % (len(self._split1), self._split1))
-        # print('\t2nd level: %d splits %s' % (len(self._split2), self._split2))
-        # print('\t3rd level: %d splits %s' % (len(self._split3), self._split3))
-        # import pudb; pudb.set_trace()  # XXX BREAKPOINT
+        print('\t1st level: %d splits %s' % (len(self._split1), self._split1))
+        print('\t2nd level: %d splits %s' % (len(self._split2), self._split2))
+        print('\t3rd level: %d splits %s' % (len(self._split3), self._split3))
         # print self._logit_map
 
     def _split_channels(self, N, groups):
@@ -59,16 +58,17 @@ class ResNet(object):
         for i in range(self._hp.num_gpu):
             with tf.device('/GPU:%d' % i):
                 with tf.name_scope('GPU_%d' % i) as scope:
-                    self._device_name_scopes.append(scope)
+                    self._device_name_scopes.append(scope)  # Keep the name scopes(used when building trainig ops)
                     print('Building model for %s' % scope)
                     self._build_model(self._images[i], self._labels[i])
                     tf.get_variable_scope().reuse_variables()
 
-        # Merge losses and accs
+        # Merge losses and accs and preds
         self.loss = tf.identity(tf.add_n(self._losses) / self._hp.num_gpu, name="cross_entropy")
         tf.scalar_summary("cross_entropy", self.loss)
         self.acc = tf.identity(tf.add_n(self._accs) / self._hp.num_gpu, name="acc")
         tf.scalar_summary("accuracy", self.acc)
+        self.preds = tf.concat(0, self._preds)
 
     def _build_model(self, image, label):
         # conv1
@@ -101,24 +101,53 @@ class ResNet(object):
             stride_down = i == 0
             x = self._residual_block(x, [1, 3, 1], [256, 256, 1024], stride_down, unit_name)
 
-        # conv5
-        for i in range(3):
-            unit_name = "res5%s" % chr(97 + i)
-            # print('Building unit: %s' % unit_name)
-            stride_down = i == 0
-            x = self._residual_block(x, [1, 3, 1], [512, 512, 2048], stride_down, unit_name)
+        if not self._hp.split:
+            # conv5
+            for i in range(3):
+                unit_name = "res5%s" % chr(97 + i)
+                # print('Building unit: %s' % unit_name)
+                stride_down = i == 0
+                x = self._residual_block(x, [1, 3, 1], [512, 512, 2048], stride_down, unit_name)
 
-        # pool5
-        print('\tBuilding unit: pool5')
-        x = tf.nn.avg_pool(x, [1, 7, 7, 1], [1, 1, 1, 1], "VALID")
+            # pool5
+            print('\tBuilding unit: pool5')
+            x = tf.nn.avg_pool(x, [1, 7, 7, 1], [1, 1, 1, 1], "VALID")
 
-        # Logit
-        with tf.variable_scope('fc1000') as scope:
-            print('\tBuilding unit: %s' % scope.name)
-            x_shape = x.get_shape().as_list()
-            x = tf.reshape(x, [-1, np.prod(x_shape[1:])])
-            x = self._fc(x, self._hp.num_classes)
+            # Logit
+            with tf.variable_scope('fc1000') as scope:
+                print('\tBuilding unit: %s' % scope.name)
+                x_shape = x.get_shape().as_list()
+                x = tf.reshape(x, [-1, np.prod(x_shape[1:])])
+                x = self._fc(x, self._hp.num_classes)
+        else:  # self._hp.split == True
+            # x: [batch_size, 14, 14, 1024]
+            x = self._residual_block(x, [1, 3, 1], [512, 512, 2048], True, "res5a")
+            # x: [batch_size, 7, 7, 2048]
+            in_split = self._split_channels(2048, self._split1)
+            out_channels_split = zip(*[self._split_channels(f, self._split1) for f in [512, 512, 2048]])
+            x = self._residual_block_split(x, in_split, [1, 3, 1], out_channels_split, False, "res5b")
+            # x: [batch_size, 7, 7, 2048]
+            in_split = self._split_channels(2048, self._split2)
+            out_channels_split = zip(*[self._split_channels(f, self._split2) for f in [512, 512, 2048]])
+            x = self._residual_block_split(x, in_split, [1, 3, 1], out_channels_split, False, "res5c")
+            # x: [batch_size, 7, 7, 2048]
 
+            # pool5
+            print('\tBuilding unit: pool5')
+            x = tf.nn.avg_pool(x, [1, 7, 7, 1], [1, 1, 1, 1], "VALID")
+            # x: [batch_size, 1, 1, 2048]
+
+            # Logit
+            with tf.variable_scope('fc1000') as scope:
+                print('\tBuilding unit: %s' % scope.name)
+                x_shape = x.get_shape().as_list()
+                x = tf.reshape(x, [-1, np.prod(x_shape[1:])])
+                in_split = self._split_channels(2048, self._split3)
+                x = self._fc_split(x, in_split, self._split3)
+                if not self._hp.no_logit_map:
+                    x = tf.transpose(tf.gather(tf.transpose(x), self._logit_map))
+
+        # x: [batch_size, 1000]
         logit = x
 
         # Probs & preds & acc
@@ -168,8 +197,35 @@ class ResNet(object):
 
         return x
 
-    def _residual_block_split(self, x, in_split, filters, channels, stride_down=False, name="unit"):
-        pass
+    def _residual_block_split(self, x, in_split, filters, out_channels_split, stride_down=False, name="unit"):
+        b, h, w, num_channel = x.get_shape().as_list()
+        assert num_channel == sum(in_split)
+        with tf.variable_scope(name) as scope:
+            print('\tBuilding residual unit: %s with %d splits' % (scope.name, len(in_split)))
+            outs = []
+            offset_in = 0
+            for i, (n_in, channels) in enumerate(zip(in_split, out_channels_split)):
+                sliced = tf.slice(x, [0, 0, 0, offset_in], [b, h, w, n_in])
+                sliced_residual = self._residual_block(sliced, filters, channels, stride_down=stride_down, name=('split_%d' % (i+1)))
+                outs.append(sliced_residual)
+                offset_in += n_in
+            concat = tf.concat(3, outs)
+        return concat
+
+    def _fc_split(self, x, in_split, out_split, name='unit'):
+        b, num_in = x.get_shape().as_list()
+        assert num_in == sum(in_split)
+        with tf.variable_scope(name) as scope:
+            print('\tBuilding fc layer: %s with %d splits' % (scope.name, len(in_split)))
+            outs = []
+            offset_in = 0
+            for i, (n_in, n_out) in enumerate(zip(in_split, out_split)):
+                sliced = tf.slice(x, [0, offset_in], [b, n_in])
+                sliced_fc = self._fc(sliced, n_out, name="split_%d" % (i+1))
+                outs.append(sliced_fc)
+                offset_in += n_in
+            concat = tf.concat(1, outs)
+        return concat
 
     def build_train_op(self):
         # Learning rate
@@ -178,7 +234,7 @@ class ResNet(object):
         self.lr = tf.placeholder(tf.float32, name='learning_rate')
         tf.scalar_summary('learing_rate', self.lr)
 
-        # Build models
+        # Compute gradients for each GPU
         opt = tf.train.MomentumOptimizer(self.lr, self._hp.momentum)
         tower_grads = []
         for i, loss in enumerate(self._losses):
@@ -192,11 +248,23 @@ class ResNet(object):
                     total_loss = loss + l2_loss
 
                     # Gradient descent step
-                    grads_and_vars = opt.compute_gradients(total_loss, tf.trainable_variables())
-                    # grads_and_vars = opt.compute_gradients(loss, tf.trainable_variables())
+                    tr_vars = tf.trainable_variables()
+                    grads_and_vars = opt.compute_gradients(total_loss, tr_vars)
+
+                    # If splitted network, Slow down the base layers' learning rate
+                    if self._hp.split:
+                        num_basenet_var = tr_vars.index('res4f/branch2c/bn/gamma:0')+1
+                        # num_basenet_var = tr_vars.index('res5a/branch2c/bn/gamma:0')+1
+                        for i in range(num_basenet_var):
+                            g, v = grads_and_vars[i]
+                            print('\tScale down learning rate of %s' % v.name)
+                            g = 0.1 * g
+                            grads_and_vars[i] = (g, v)
+
                     tower_grads.append(grads_and_vars)
 
-        with tf.name_scope('Average_grad'), tf.device('/CPU:0'):
+        # Average grads from GPUs
+        with tf.name_scope('Average_grad'):
             average_grads_and_vars = self._average_gradients(tower_grads)
             apply_grad_op = opt.apply_gradients(average_grads_and_vars)
 

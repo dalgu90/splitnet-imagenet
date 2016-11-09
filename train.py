@@ -10,6 +10,7 @@ import numpy as np
 
 import imagenet_input as data_input
 import resnet
+import utils
 
 
 # Dataset Configuration
@@ -24,6 +25,7 @@ tf.app.flags.DEFINE_integer('num_test_instance', 50000, """Number of test images
 # Network Configuration
 tf.app.flags.DEFINE_integer('num_gpu', 1, """Number of GPUs""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Number of images to process in a batch.""")
+tf.app.flags.DEFINE_boolean('split', False, """Whether to use split""")
 tf.app.flags.DEFINE_string('cluster_path', './scripts/clustering.pkl', """Path to 3-level clustering of ImageNet.""")
 tf.app.flags.DEFINE_boolean('no_logit_map', False, """Whether to re-map logit for classes to be clustered correctly.
                                                       If set to True, the classes will be wrongly clustered.""")
@@ -76,8 +78,10 @@ def train():
     print('[Network Configuration]')
     print('\tNumber of GPUs: %d' % FLAGS.num_gpu)
     print('\tBatch size: %d' % FLAGS.batch_size)
-    print('\tClustering path: %s' % FLAGS.cluster_path)
-    print('\tNo logit map: %s' % FLAGS.no_logit_map)
+    print('\tSplitted Network: %s' % FLAGS.split)
+    if FLAGS.split:
+        print('\tClustering path: %s' % FLAGS.cluster_path)
+        print('\tNo logit map: %s' % FLAGS.no_logit_map)
 
     print('[Optimization Configuration]')
     print('\tL2 loss weight: %f' % FLAGS.l2_weight)
@@ -120,12 +124,14 @@ def train():
         print('Learning rate decays at iter: %s' % str(lr_decay_steps))
         hp = resnet.HParams(num_gpu=FLAGS.num_gpu,
                             batch_size=FLAGS.batch_size,
+                            split=FLAGS.split,
                             num_classes=FLAGS.num_classes,
                             weight_decay=FLAGS.l2_weight,
                             momentum=FLAGS.momentum,
                             no_logit_map=FLAGS.no_logit_map)
         network = resnet.ResNet(hp, images, labels, global_step)
-        network.set_clustering(clustering)
+        if FLAGS.split:
+            network.set_clustering(clustering)
         network.build_model()
         print('%d flops' % network._flops)
         print('%d params' % network._weights)
@@ -152,10 +158,12 @@ def train():
             saver.restore(sess, ckpt.model_checkpoint_path)
             init_step = int(ckpt.model_checkpoint_path.split('/')[-1].split('-')[-1])
         else:
-            saver_base = tf.train.Saver(tf.all_variables()[:268])
             ckpt_base = tf.train.get_checkpoint_state(FLAGS.baseline_dir)
             if ckpt_base and ckpt_base.model_checkpoint_path:
+                # Check loadable variables(variable with same name and same shape) and load them only
                 print('No checkpoint file found. Start from the baseline.')
+                loadable_vars = utils._get_loadable_vars(ckpt_base.model_checkpoint_path, verbose=True)
+                saver_base = tf.train.Saver(loadable_vars)
                 saver_base.restore(sess, ckpt_base.model_checkpoint_path)
             else:
                 print('No checkpoint file found. Start from the scratch.')
