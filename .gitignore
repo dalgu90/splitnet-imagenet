@@ -60,4 +60,4 @@ scripts/resnet_v1_50.ckpt
 !eval.sh
 
 # Trained checkpoints
-train*
+train*/

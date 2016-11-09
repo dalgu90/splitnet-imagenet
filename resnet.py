@@ -7,62 +7,109 @@ import utils
 
 
 HParams = namedtuple('HParams',
-                     'batch_size, num_classes, weight_decay, momentum')
+                     'num_gpu, batch_size, num_classes, weight_decay, '
+                     'momentum, no_logit_map')
 
 
 class ResNet(object):
     def __init__(self, hp, images, labels, global_step):
         self._hp = hp  # Hyperparameters
-        self._images = images  # Input image
-        self._labels = labels
+        self._images = tf.split(0, self._hp.num_gpu, images)  # Input image
+        self._labels = tf.split(0, self._hp.num_gpu, labels)
         self._global_step = global_step
         self.lr = tf.placeholder(tf.float32)
         self.is_train = tf.placeholder(tf.bool)
+        self._logits = []
+        self._probs = []
+        self._preds = []
+        self._accs = []
+        self._losses = []
+        self._counted_scope = []
+        self._device_name_scopes = []
         self._flops = 0
         self._weights = 0
 
-    def build_model(self):
-        print('Building model')
+    def set_clustering(self, clustering):
+        # clustering: 4-depth list(list of list of list of list)
+        # which represented 3-depth tree
+        # print('Parsing clustering')
+        cluster_size = [[[len(sublist3) for sublist3 in sublist2] for sublist2 in sublist1] for sublist1 in clustering]
+        self._split3 = [item for sublist1 in cluster_size for sublist2 in sublist1 for item in sublist2]
+        self._split2 = [sum(sublist2) for sublist1 in cluster_size for sublist2 in sublist1]
+        self._split1 = [sum([sum(sublist2) for sublist2 in sublist1]) for sublist1 in cluster_size]
+        self._logit_map = [item for sublist1 in clustering for sublist2 in sublist1 for sublist3 in sublist2 for item in sublist3]
+        # print('\t1st level: %d splits %s' % (len(self._split1), self._split1))
+        # print('\t2nd level: %d splits %s' % (len(self._split2), self._split2))
+        # print('\t3rd level: %d splits %s' % (len(self._split3), self._split3))
+        # import pudb; pudb.set_trace()  # XXX BREAKPOINT
+        # print self._logit_map
 
+    def _split_channels(self, N, groups):
+        group_total = sum(groups)
+        float_outputs = [float(N)*t/group_total for t in groups]
+        for i in xrange(1, len(float_outputs), 1):
+            float_outputs[i] = float_outputs[i-1] + float_outputs[i]
+        outputs = map(int, map(round, float_outputs))
+        for i in xrange(len(outputs)-1, 0, -1):
+            outputs[i] = outputs[i] - outputs[i-1]
+        return outputs
+
+    def build_model(self):
+        # Build models
+        for i in range(self._hp.num_gpu):
+            with tf.device('/GPU:%d' % i):
+                with tf.name_scope('GPU_%d' % i) as scope:
+                    self._device_name_scopes.append(scope)
+                    print('Building model for %s' % scope)
+                    self._build_model(self._images[i], self._labels[i])
+                    tf.get_variable_scope().reuse_variables()
+
+        # Merge losses and accs
+        self.loss = tf.identity(tf.add_n(self._losses) / self._hp.num_gpu, name="cross_entropy")
+        tf.scalar_summary("cross_entropy", self.loss)
+        self.acc = tf.identity(tf.add_n(self._accs) / self._hp.num_gpu, name="acc")
+        tf.scalar_summary("accuracy", self.acc)
+
+    def _build_model(self, image, label):
         # conv1
         print('\tBuilding unit: conv1')
         with tf.variable_scope('conv1'):
-            x = self._conv(self._images, 7, 64, 2)
+            x = self._conv(image, 7, 64, 2)
             x = self._bn(x)
             x = self._relu(x)
 
-        print('Building unit: pool2')
+        print('\tBuilding unit: pool2')
         x = tf.nn.max_pool(x, [1, 3, 3, 1], [1, 2, 2, 1], "SAME")
 
         # conv2
         for i in range(3):
             unit_name = "res2%s" % chr(97 + i)
-            print('Building unit: %s' % unit_name)
+            # print('Building unit: %s' % unit_name)
             x = self._residual_block(x, [1, 3, 1], [64, 64, 256], False, unit_name)
 
         # conv3
         for i in range(4):
             unit_name = "res3%s" % chr(97 + i)
-            print('Building unit: %s' % unit_name)
+            # print('Building unit: %s' % unit_name)
             stride_down = i == 0
             x = self._residual_block(x, [1, 3, 1], [128, 128, 512], stride_down, unit_name)
 
         # conv4
         for i in range(6):
             unit_name = "res4%s" % chr(97 + i)
-            print('Building unit: %s' % unit_name)
+            # print('Building unit: %s' % unit_name)
             stride_down = i == 0
             x = self._residual_block(x, [1, 3, 1], [256, 256, 1024], stride_down, unit_name)
 
         # conv5
         for i in range(3):
             unit_name = "res5%s" % chr(97 + i)
-            print('Building unit: %s' % unit_name)
+            # print('Building unit: %s' % unit_name)
             stride_down = i == 0
             x = self._residual_block(x, [1, 3, 1], [512, 512, 2048], stride_down, unit_name)
 
         # pool5
-        print('Building unit: pool5')
+        print('\tBuilding unit: pool5')
         x = tf.nn.avg_pool(x, [1, 7, 7, 1], [1, 1, 1, 1], "VALID")
 
         # Logit
@@ -72,24 +119,27 @@ class ResNet(object):
             x = tf.reshape(x, [-1, np.prod(x_shape[1:])])
             x = self._fc(x, self._hp.num_classes)
 
-        self._logits = x
+        logit = x
 
         # Probs & preds & acc
-        self.probs = tf.nn.softmax(x, name='probs')
-        self.preds = tf.to_int32(tf.argmax(self._logits, 1, name='preds'))
+        prob = tf.nn.softmax(x, name='probs')
+        pred = tf.to_int32(tf.argmax(logit, 1, name='preds'))
         with tf.variable_scope("acc"):
             ones = tf.constant(np.ones([self._hp.batch_size]), dtype=tf.float32)
             zeros = tf.constant(np.zeros([self._hp.batch_size]), dtype=tf.float32)
-            correct = tf.select(tf.equal(self.preds, self._labels), ones, zeros)
-            self.acc = tf.reduce_mean(correct, name='acc')
-        tf.scalar_summary('accuracy', self.acc)
+            correct = tf.select(tf.equal(pred, label), ones, zeros)
+            acc = tf.reduce_mean(correct, name='acc')
 
         # Loss & acc
         with tf.variable_scope("loss"):
-            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(x, self._labels)
-            self.loss = tf.reduce_mean(loss, name='cross_entropy')
-        tf.scalar_summary('cross_entropy', self.loss)
+            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(x, label)
+            loss = tf.reduce_mean(loss, name='cross_entropy')
 
+        self._logits.append(logit)
+        self._probs.append(prob)
+        self._preds.append(pred)
+        self._accs.append(acc)
+        self._losses.append(loss)
 
     def _residual_block(self, x, filters, channels, stride_down=False, name="unit"):
         with tf.variable_scope(name) as scope:
@@ -118,26 +168,37 @@ class ResNet(object):
 
         return x
 
-    def build_train_op(self):
-        # Add l2 loss
-        with tf.variable_scope('l2_loss'):
-            costs = [tf.nn.l2_loss(var) for var in tf.get_collection(utils.WEIGHT_DECAY_KEY)]
-            # for var in tf.get_collection(utils.WEIGHT_DECAY_KEY):
-                # tf.histogram_summary(var.op.name, var)
-            l2_loss = tf.mul(self._hp.weight_decay, tf.add_n(costs))
-        self._total_loss = self.loss + l2_loss
+    def _residual_block_split(self, x, in_split, filters, channels, stride_down=False, name="unit"):
+        pass
 
+    def build_train_op(self):
         # Learning rate
         # self.lr = tf.train.exponential_decay(self._hp.initial_lr, self._global_step,
                                         # self._hp.decay_step, self._hp.lr_decay, staircase=True)
         self.lr = tf.placeholder(tf.float32, name='learning_rate')
         tf.scalar_summary('learing_rate', self.lr)
 
-        # Gradient descent step
+        # Build models
         opt = tf.train.MomentumOptimizer(self.lr, self._hp.momentum)
-        grads_and_vars = opt.compute_gradients(self._total_loss, tf.trainable_variables())
-        # print '\n'.join([t.name for t in tf.trainable_variables()])
-        apply_grad_op = opt.apply_gradients(grads_and_vars, global_step=self._global_step)
+        tower_grads = []
+        for i, loss in enumerate(self._losses):
+            with tf.device('/GPU:%d' % i):
+                with tf.name_scope(self._device_name_scopes[i]) as scope:
+                    print('Compute gradients for %s' % scope)
+                    # Add l2 loss
+                    with tf.variable_scope('l2_loss'):
+                        costs = [tf.nn.l2_loss(var) for var in tf.get_collection(utils.WEIGHT_DECAY_KEY)]
+                        l2_loss = tf.mul(self._hp.weight_decay, tf.add_n(costs))
+                    total_loss = loss + l2_loss
+
+                    # Gradient descent step
+                    grads_and_vars = opt.compute_gradients(total_loss, tf.trainable_variables())
+                    # grads_and_vars = opt.compute_gradients(loss, tf.trainable_variables())
+                    tower_grads.append(grads_and_vars)
+
+        with tf.name_scope('Average_grad'), tf.device('/CPU:0'):
+            average_grads_and_vars = self._average_gradients(tower_grads)
+            apply_grad_op = opt.apply_gradients(average_grads_and_vars)
 
         # Batch normalization moving average update
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -151,27 +212,71 @@ class ResNet(object):
     def _conv(self, x, filter_size, out_channel, stride, pad="SAME", name="conv"):
         b, h, w, in_channel = x.get_shape().as_list()
         x = utils._conv(x, filter_size, out_channel, stride, pad, name)
-        self._flops += (h/stride) * (w/stride) * in_channel * out_channel * filter_size * filter_size
-        self._weights += in_channel * out_channel * filter_size * filter_size
+        f = (h/stride) * (w/stride) * in_channel * out_channel * filter_size * filter_size
+        w = in_channel * out_channel * filter_size * filter_size
+        scope_name = tf.get_variable_scope().name + "/" + name
+        self._add_flops_weights(scope_name, f, w)
         return x
 
     def _fc(self, x, out_dim, name="fc"):
         b, in_dim = x.get_shape().as_list()
         x = utils._fc(x, out_dim, name)
-        self._flops += (in_dim + 1) * out_dim
-        self._weights += (in_dim + 1) * out_dim
+        f = (in_dim + 1) * out_dim
+        w = (in_dim + 1) * out_dim
+        scope_name = tf.get_variable_scope().name + "/" + name
+        self._add_flops_weights(scope_name, f, w)
         return x
 
     def _bn(self, x, name="bn"):
         x = utils._bn(x, self.is_train, self._global_step, name)
-        self._flops += 8 * self._get_data_size(x)
-        self._weights += 4 * x.get_shape().as_list()[-1]
+        f = 8 * self._get_data_size(x)
+        w = 4 * x.get_shape().as_list()[-1]
+        scope_name = tf.get_variable_scope().name + "/" + name
+        self._add_flops_weights(scope_name, f, w)
         return x
 
     def _relu(self, x, name="relu"):
         x = utils._relu(x, 0.0, name)
-        self._flops += self._get_data_size(x)
+        f = self._get_data_size(x)
+        scope_name = tf.get_variable_scope().name + "/" + name
+        self._add_flops_weights(scope_name, f, 0)
         return x
 
     def _get_data_size(self, x):
         return np.prod(x.get_shape().as_list()[1:])
+
+    def _add_flops_weights(self, scope_name, f, w):
+        if scope_name not in self._counted_scope:
+            self._flops += f
+            self._weights += w
+            self._counted_scope.append(scope_name)
+
+    def _average_gradients(self, tower_grads):
+        average_grads = []
+        for grad_and_vars in zip(*tower_grads):
+            # If no gradient for a variable, exclude it from output
+            if grad_and_vars[0][0] is None:
+                continue
+
+            # Note that each grad_and_vars looks like the following:
+            #   ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
+            grads = []
+            for g, _ in grad_and_vars:
+              # Add 0 dimension to the gradients to represent the tower.
+              expanded_g = tf.expand_dims(g, 0)
+
+              # Append on a 'tower' dimension which we will average over below.
+              grads.append(expanded_g)
+
+            # Average over the 'tower' dimension.
+            grad = tf.concat(0, grads)
+            grad = tf.reduce_mean(grad, 0)
+
+            # Keep in mind that the Variables are redundant because they are shared
+            # across towers. So .. we will just return the first tower's pointer to
+            # the Variable.
+            v = grad_and_vars[0][1]
+            grad_and_var = (grad, v)
+            average_grads.append(grad_and_var)
+
+        return average_grads
