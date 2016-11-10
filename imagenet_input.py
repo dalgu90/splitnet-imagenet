@@ -20,6 +20,7 @@ from tensorflow.python.platform import gfile
 RESNET_MEAN_FPATH = 'ResNet_mean_rgb.pkl'
 
 # Constants used in the model
+RESIZE_SIZE = 256
 IMAGE_HEIGHT = 224
 IMAGE_WIDTH = 224
 
@@ -71,7 +72,7 @@ def read_input_file(txt_fpath, dataset_root, shuffle=False):
 def preprocess_image(input_image):
   # Preprocess the image: resize -> mean subtract -> channel swap (-> transpose X -> scale X)
   image = tf.cast(input_image, tf.float32)
-  image = tf.image.resize_images(image, [IMAGE_HEIGHT, IMAGE_WIDTH])
+  # image = tf.image.resize_images(image, [IMAGE_HEIGHT, IMAGE_WIDTH])
   # image_R, image_G, image_B = tf.split(2, 3, image)
 
   # 1) Subtract channel mean
@@ -160,14 +161,14 @@ def distorted_inputs(dataset_root, txt_fpath, batch_size, shuffle=True):
 
   distorted_image = tf.cast(read_input.image, tf.float32)
 
-#  height = IMAGE_SIZE
-#  width = IMAGE_SIZE
-#
-#  # Image processing for training the network. Note the many random
-#  # distortions applied to the image.
-#
-#  # Randomly crop a [height, width] section of the image.
-#  distorted_image = tf.image.random_crop(reshaped_image, [height, width])
+  height = IMAGE_HEIGHT
+  width = IMAGE_WIDTH
+
+  # Image processing for training the network. Note the many random
+  # distortions applied to the image.
+
+  # Randomly crop a [height, width] section of the image.
+  distorted_image = tf.random_crop(distorted_image, [height, width, 3])
 
   # Randomly flip the image horizontally.
   distorted_image = tf.image.random_flip_left_right(distorted_image)
@@ -212,8 +213,13 @@ def inputs(dataset_root, txt_fpath, batch_size, shuffle=False):
   # Read examples from files.
   read_input = read_input_file(txt_fpath, dataset_root, shuffle)
 
+  image = tf.cast(read_input.image, tf.float32)
+  height = IMAGE_HEIGHT
+  width = IMAGE_WIDTH
+  image = tf.random_crop(image, [height, width, 3])
+
   # Preprocess the image
-  image = preprocess_image(read_input.image)
+  image = preprocess_image(image)
 
   # Generate a batch of images and labels by building up a queue of examples.
   min_queue_examples = batch_size * 10;

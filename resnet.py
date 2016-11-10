@@ -253,8 +253,8 @@ class ResNet(object):
 
                     # If splitted network, Slow down the base layers' learning rate
                     if self._hp.split:
-                        num_basenet_var = tr_vars.index('res4f/branch2c/bn/gamma:0')+1
-                        # num_basenet_var = tr_vars.index('res5a/branch2c/bn/gamma:0')+1
+                        num_basenet_var = [i for i, v in enumerate(tr_vars) if v.name=='res4f/branch2c/bn/gamma:0'][0]+1
+                        # num_basenet_var = [i for i, v in enumerate(tr_vars) if v.name=='res5a/branch2c/bn/gamma:0'][0]+1
                         for i in range(num_basenet_var):
                             g, v = grads_and_vars[i]
                             print('\tScale down learning rate of %s' % v.name)
@@ -264,7 +264,7 @@ class ResNet(object):
                     tower_grads.append(grads_and_vars)
 
         # Average grads from GPUs
-        with tf.name_scope('Average_grad'):
+        with tf.name_scope('Average_grad'), tf.device('/CPU:0'):
             average_grads_and_vars = self._average_gradients(tower_grads)
             apply_grad_op = opt.apply_gradients(average_grads_and_vars)
 

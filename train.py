@@ -15,9 +15,9 @@ import utils
 
 # Dataset Configuration
 tf.app.flags.DEFINE_string('train_dataset', 'scripts/train_shuffle.txt', """Path to the ILSVRC2012 the training dataset list file""")
-tf.app.flags.DEFINE_string('train_image_root', '/data1/common_datasets/ILSVRC2012/train/', """Path to the root of ILSVRC2012 training images""")
+tf.app.flags.DEFINE_string('train_image_root', '/data1/common_datasets/imagenet_resized/', """Path to the root of ILSVRC2012 training images""")
 tf.app.flags.DEFINE_string('test_dataset', 'scripts/val.txt', """Path to the test dataset list file""")
-tf.app.flags.DEFINE_string('test_image_root', '/data1/common_datasets/ILSVRC2012/val/', """Path to the root of ILSVRC2012 test images""")
+tf.app.flags.DEFINE_string('test_image_root', '/data1/common_datasets/imagenet_resized/ILSVRC2012_val/', """Path to the root of ILSVRC2012 test images""")
 tf.app.flags.DEFINE_integer('num_classes', 1000, """Number of classes in the dataset.""")
 tf.app.flags.DEFINE_integer('num_train_instance', 1281166, """Number of training images.""")
 tf.app.flags.DEFINE_integer('num_test_instance', 50000, """Number of test images.""")
@@ -151,6 +151,7 @@ def train():
 
         # Create a saver.
         saver = tf.train.Saver(tf.all_variables(), max_to_keep=10000)
+        # saver = tf.train.Saver(tf.all_variables(), max_to_keep=10000, write_version=tf.train.SaverDef.V2)
         ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
         if ckpt and ckpt.model_checkpoint_path:
             print('\tRestore from %s' % ckpt.model_checkpoint_path)
@@ -164,6 +165,7 @@ def train():
                 print('No checkpoint file found. Start from the baseline.')
                 loadable_vars = utils._get_loadable_vars(ckpt_base.model_checkpoint_path, verbose=True)
                 saver_base = tf.train.Saver(loadable_vars)
+                # saver_base = tf.train.Saver(loadable_vars, write_version=tf.train.SaverDef.V2)
                 saver_base.restore(sess, ckpt_base.model_checkpoint_path)
             else:
                 print('No checkpoint file found. Start from the scratch.')

@@ -61,3 +61,4 @@ scripts/resnet_v1_50.ckpt
 
 # Trained checkpoints
 train*/
+eval_*.txt
